@@ -14,7 +14,8 @@ export default function App() {
     setResult(null)
 
     try {
-      const res  = await fetch('/api/analyze', {
+      const base = import.meta.env.VITE_API_URL ?? ''
+      const res  = await fetch(`${base}/api/analyze`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ url, fetch_content: fetchContent }),
