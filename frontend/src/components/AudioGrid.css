@@ -1,0 +1,46 @@
+.audio-grid { display: flex; flex-wrap: wrap; gap: .6rem; }
+
+.audio-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: .7rem 1rem;
+  min-width: 145px;
+}
+
+.audio-type {
+  font-size: .68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  margin-bottom: .3rem;
+}
+
+.audio-codec {
+  font-family: 'Courier New', monospace;
+  font-size: .82rem;
+  color: var(--text);
+}
+
+.audio-ch {
+  font-size: .77rem;
+  color: var(--muted);
+  margin-top: .2rem;
+}
+
+/* AAC */
+.audio-card--aac .audio-type { color: var(--muted); }
+
+/* Dolby Digital */
+.audio-card--dolby {
+  border-color: #ddd6fe;
+  background: #faf5ff;
+}
+.audio-card--dolby .audio-type { color: #7c3aed; }
+
+/* Dolby Atmos */
+.audio-card--atmos {
+  border-color: #c4b5fd;
+  background: linear-gradient(135deg, #faf5ff, #ede9fe);
+}
+.audio-card--atmos .audio-type  { color: #6d28d9; }
+.audio-card--atmos .audio-codec { font-weight: 600; }

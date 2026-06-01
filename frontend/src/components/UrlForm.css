@@ -1,0 +1,43 @@
+.url-form { display: flex; flex-direction: column; gap: .75rem; }
+
+.url-row { display: flex; gap: .6rem; }
+
+.url-input {
+  flex: 1;
+  padding: .7rem 1rem;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  font-size: .95rem;
+  font-family: 'Courier New', monospace;
+  background: var(--bg);
+  color: var(--text);
+  transition: border-color .15s;
+  min-width: 0;
+}
+.url-input:focus  { outline: none; border-color: var(--primary); background: #fff; }
+.url-input:disabled { opacity: .6; }
+
+.btn-analyze {
+  padding: .7rem 1.5rem;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: .95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background .15s, opacity .15s;
+}
+.btn-analyze:hover:not(:disabled) { background: var(--primary-h); }
+.btn-analyze:disabled { opacity: .5; cursor: not-allowed; }
+
+.check-label {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  color: var(--muted);
+  font-size: .875rem;
+  user-select: none;
+  cursor: pointer;
+}
+.check-label input { accent-color: var(--primary); cursor: pointer; }
