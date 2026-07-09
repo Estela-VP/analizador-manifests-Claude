@@ -6,6 +6,7 @@ from urllib.parse import urlparse, parse_qs
 import urllib.request
 import ssl
 import xml.etree.ElementTree as ET
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -352,6 +353,173 @@ def parse_mpd(xml_text: str) -> ManifestContent:
             content.has_thumbnails = True
 
     content.is_multikey = video_adaptation_count > 1
+
+    # Deduplicar pistas de audio: mismo codec+canales → un solo registro.
+    # El manifest puede tener el mismo formato una vez por idioma; aquí solo
+    # nos interesa qué formatos están disponibles, no cuántos idiomas hay.
+    seen_audio: set[tuple] = set()
+    unique_tracks: list[AudioTrack] = []
+    for track in content.audio_tracks:
+        key = (track.codec, track.channels, track.is_atmos)
+        if key not in seen_audio:
+            seen_audio.add(key)
+            unique_tracks.append(track)
+    content.audio_tracks = unique_tracks
+
+    content.streaming_profile = _match_profile(content.video_layers)
+    return content
+
+
+# ── HLS parsing ───────────────────────────────────────────────────────────────
+
+def _parse_hls_attrs(attr_str: str) -> dict:
+    """Parsea una lista de atributos HLS: KEY=VALUE, KEY="VALUE CON ESPACIOS"."""
+    attrs = {}
+    for m in re.finditer(r'([\w-]+)=("(?:[^"\\]|\\.)*"|[^,]+)', attr_str):
+        key = m.group(1).upper()
+        val = m.group(2)
+        if val.startswith('"') and val.endswith('"'):
+            val = val[1:-1]
+        attrs[key] = val
+    return attrs
+
+
+def _infer_audio_codec(codecs_str: str, group_id: str = "") -> Optional[str]:
+    """Infiere el codec de audio desde la cadena de codecs o el GROUP-ID."""
+    combined = f"{codecs_str},{group_id}".lower()
+    if "ec-3" in combined or "ec3" in combined:
+        return "ec-3"
+    if "ac-3" in combined or "ac3" in combined:
+        return "ac-3"
+    if "mp4a" in combined or "aacl" in combined or "aac" in combined:
+        for token in codecs_str.split(","):
+            token = token.strip()
+            if token.startswith("mp4a"):
+                return token
+        return "mp4a.40.2"
+    return None
+
+
+def parse_hls(m3u8_text: str) -> ManifestContent:
+    content = ManifestContent()
+    lines = m3u8_text.splitlines()
+
+    if not lines or not lines[0].strip().startswith("#EXTM3U"):
+        content.error = "No es un playlist HLS válido"
+        return content
+
+    if not any(l.strip().startswith(("#EXT-X-STREAM-INF", "#EXT-X-MEDIA")) for l in lines):
+        content.error = "Es un playlist de media, no un master playlist"
+        return content
+
+    # Paso 1: recoger grupos de audio desde EXT-X-MEDIA
+    # dict GROUP-ID → AudioTrack; también subtítulos e imágenes
+    audio_groups: dict[str, AudioTrack] = {}
+
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("#EXT-X-MEDIA:"):
+            continue
+        attrs = _parse_hls_attrs(line[len("#EXT-X-MEDIA:"):])
+        media_type = attrs.get("TYPE", "")
+
+        if media_type == "AUDIO":
+            group_id = attrs.get("GROUP-ID", "")
+            if group_id in audio_groups:
+                continue  # mismo grupo, variante de idioma — ignorar
+
+            channels_str = attrs.get("CHANNELS", "")
+            codecs_str = attrs.get("CODECS", "")
+
+            channels = None
+            is_atmos = False
+            if channels_str:
+                if "/JOC" in channels_str:
+                    is_atmos = True
+                try:
+                    channels = int(channels_str.split("/")[0])
+                except ValueError:
+                    pass
+            if "atmos" in group_id.lower() or "joc" in group_id.lower():
+                is_atmos = True
+
+            codec = _infer_audio_codec(codecs_str, group_id)
+            audio_groups[group_id] = AudioTrack(codec=codec, channels=channels, is_atmos=is_atmos)
+
+        elif media_type in ("SUBTITLES", "CLOSED-CAPTIONS"):
+            content.has_subtitles = True
+
+        elif media_type == "IMAGE":
+            content.has_thumbnails = True
+
+    # Paso 2: EXT-X-STREAM-INF → capas de vídeo + refinar codec de audio
+    seen_video_keys: set[tuple] = set()
+
+    for line in lines:
+        line = line.strip()
+
+        if line.startswith("#EXT-X-I-FRAME-STREAM-INF:"):
+            content.has_thumbnails = True
+            continue
+
+        if not line.startswith("#EXT-X-STREAM-INF:"):
+            continue
+
+        attrs = _parse_hls_attrs(line[len("#EXT-X-STREAM-INF:"):])
+        bandwidth  = int(attrs.get("BANDWIDTH", 0) or 0)
+        resolution = attrs.get("RESOLUTION", "")
+        frame_rate = attrs.get("FRAME-RATE", "")
+        codecs_str = attrs.get("CODECS", "")
+        audio_group = attrs.get("AUDIO", "")
+
+        # Refinar codec del audio group usando los CODECS del STREAM-INF
+        if audio_group and audio_group in audio_groups:
+            track = audio_groups[audio_group]
+            if not track.codec:
+                for c in codecs_str.split(","):
+                    c = c.strip()
+                    # El codec de audio es el que NO empieza por un codec de vídeo conocido
+                    if c[:4] not in ("avc1", "hvc1", "hev1", "dvh1", "dvhe", "av01", "mp4v"):
+                        inferred = _infer_audio_codec(c, audio_group)
+                        if inferred:
+                            track.codec = inferred
+                            break
+
+        # Deduplicar por (bandwidth, resolution): cada par aparece una vez por grupo de audio
+        dedup_key = (bandwidth, resolution)
+        if dedup_key in seen_video_keys:
+            continue
+        seen_video_keys.add(dedup_key)
+
+        width, height = None, None
+        if "x" in resolution.lower():
+            parts = resolution.lower().split("x")
+            try:
+                width, height = int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
+
+        video_codec = None
+        for c in codecs_str.split(","):
+            c = c.strip()
+            if c[:4] in ("avc1", "hvc1", "hev1", "dvh1", "dvhe", "av01", "mp4v"):
+                video_codec = c
+                break
+
+        if bandwidth:
+            content.video_layers.append(VideoLayer(
+                bandwidth=bandwidth,
+                width=width,
+                height=height,
+                framerate=_parse_framerate(frame_rate),
+                codec=video_codec,
+            ))
+            content.has_video = True
+
+    if audio_groups:
+        content.audio_tracks = list(audio_groups.values())
+        content.has_audio = True
+
     content.streaming_profile = _match_profile(content.video_layers)
     return content
 
@@ -386,14 +554,17 @@ def analyze(url: str, fetch_content: bool = True) -> dict:
         "content":       None,
     }
 
-    if not fetch_content or manifest_type != "mpd":
+    if not fetch_content or manifest_type not in ("mpd", "hls"):
         return result
 
     # Download + parse
     content = ManifestContent()
     try:
-        xml_text = download_manifest(url)
-        content  = parse_mpd(xml_text)
+        raw = download_manifest(url)
+        if manifest_type == "mpd":
+            content = parse_mpd(raw)
+        else:
+            content = parse_hls(raw)
     except Exception as e:
         content.error = str(e)
 
